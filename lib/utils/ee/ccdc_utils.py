@@ -168,7 +168,9 @@ def build_ccd_image(fit, n_segments, band_list):
 def get_ccdc_coefs(
     raw_ccdc_image, segs, bands, date, coef_tags, normalize=True, behavior="after"
 ):
-    ccdc_image = build_ccd_image(raw_ccdc_image, len(segs), bands)
+    # Get the number of segments as a Python integer
+    n_segments = segs.size().getInfo()
+    ccdc_image = build_ccd_image(raw_ccdc_image, n_segments, bands)
     coefs = get_multi_coefs(
         ccdc_image, date, bands, coef_tags, normalize, segs, behavior
     )

@@ -11,7 +11,7 @@ each image in the input image collection so you should always select the band
 you want to use when defining the collection.
 
 Ensure that each image collection you define in this file is set as a value in
-the COLLECTIONS dictionary. 
+the COLLECTIONS dictionary.
 To set which image collection is used in pest set the value of the
 `--collection` flag to the key of the collection in COLLECTIONS that you want
 to use for the given run.
@@ -109,6 +109,40 @@ L8_GATHER_COLLECTIONS = gather_collections_and_reduce(
             "DW": False,
         },
         "first_expectation_year": 2020,
+        "verbose": False,
+    }
+)
+
+PNW_L8_L9_2017_2018 = gather_collections_and_reduce(
+    {
+        "L8dictionary": {
+            "years_list": [2017, 2018],
+            "first_doy": 1,
+            "last_doy": 365,
+            "cloud_cover_threshold": 20,
+        },
+        "L9dictionary": {
+            "years_list": [2017, 2018],
+            "first_doy": 1,
+            "last_doy": 365,
+            "cloud_cover_threshold": 20,
+        },
+        "default_study_area": (ee.Geometry.Polygon(PNW["coords"])),
+        "band_name_reduction": "swir",
+        "which_reduction": "SWIR",
+        "day_step_size": 14,
+        "verbose": False,
+        "dataset_selection": {
+            "L5": False,
+            "L7": False,
+            "L8": True,
+            "L9": True,
+            "MO": False,
+            "S2": False,
+            "S1": False,
+            "DW": False,
+        },
+        "first_expectation_year": 2017,
         "verbose": False,
     }
 )
@@ -333,6 +367,7 @@ L7_L8_L9_PNW_2017_2018 = gather_collections_and_reduce(
 CCDC_GLOBAL = ee.ImageCollection("GOOGLE/GLOBAL_CCDC/V1")
 
 COLLECTIONS = {
+    "PNW_L8_L9_2017_2018": PNW_L8_L9_2017_2018,
     "PNW_L8_L9_2022_2023": PNW_L8_L9_2022_2023,
     "PNW_L8_L9_2022_2023_DSS_1": PNW_L8_L9_2022_2023_DSS_1,
     "PNW_L8_L9_2022": PNW_L8_L9_2022,

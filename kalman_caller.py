@@ -29,8 +29,8 @@ INITIALIZATION = Initialization.CCDC
 COLLECTION_PARAMETERS = {
     "index": Index.SWIR,
     "sensors": [Sensor.L7, Sensor.L8, Sensor.L9],
-    "years": [2017],
-    "point_group": "pnw_1",
+    "years": [2016, 2017, 2018],
+    "point_group": "20250930_132850-15_points",
     "day_step_size": 6,
     "start_doy": 1,
     "end_doy": 365,
