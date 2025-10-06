@@ -271,7 +271,6 @@ def get_multi_synthetic(image, date, date_format, band_list, segments):
 
     return ee.Image.cat(list(map(retrieve_synthetic, band_list)))
 
-
 def get_segments_for_coordinates(coordinates):
     ccdc_asset = COLLECTIONS["CCDC_Global"].mosaic()
 
