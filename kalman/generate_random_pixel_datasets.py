@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-from gc import collect
-from pprint import pprint
 import random
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +9,15 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Sequence
 
 import ee
+
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from kalman.kalman_module import fetch_ccdc_coefficients
+from lib.constants import CCDC, HARMONIC_TAGS
 
 ee.Initialize(opt_url=ee.data.HIGH_VOLUME_API_BASE_URL)
 
@@ -39,6 +46,10 @@ CSV_FIELDNAMES = [
     "date",
     "observed",
 ]
+
+CCDC_FIELDNAMES = [f"{CCDC.BAND_PREFIX.value}_{tag}" for tag in HARMONIC_TAGS]
+CCDC_FIELDNAMES.append(CCDC.FIT.value)
+CSV_FIELDNAMES.extend(CCDC_FIELDNAMES)
 
 
 @dataclass(frozen=True)
@@ -134,15 +145,11 @@ def build_sensor_configs() -> Dict[str, SensorConfig]:
 
 
 def chunked(sequence: Sequence[Point], size: int) -> Iterable[Sequence[Point]]:
-    """Yield successive chunks from a sequence."""
-
     for start in range(0, len(sequence), size):
         yield sequence[start : start + size]
 
 
 def generate_random_points(count: int, prefix: str, rng: random.Random) -> List[Point]:
-    """Sample random points (lon/lat) within the study region."""
-
     points: List[Point] = []
     for idx in range(count):
         lon = rng.uniform(LON_MIN, LON_MAX)
@@ -152,7 +159,6 @@ def generate_random_points(count: int, prefix: str, rng: random.Random) -> List[
 
 
 def add_time_band(image: ee.Image) -> ee.Image:
-
     millis = ee.Number(image.get("system:time_start"))
     time_band = ee.Image.constant(millis).toInt64().rename("millis")
     return ee.Image(image).addBands(time_band)
@@ -181,8 +187,10 @@ def prepare_collection(
         value_band = ee.Image(value_band).copyProperties(
             image, image.propertyNames()
         )
-        return add_time_band(value_band)
-        # return value_band
+        value_band = add_time_band(value_band)
+        value_band = fetch_ccdc_coefficients(value_band, ee.Number(value_band.get("system:time_start")), ["SWIR2"])
+
+        return value_band
 
     return collection.map(apply_all).sort("system:time_start")
 
@@ -238,20 +246,27 @@ def features_to_rows(
         if not point_id or millis is None or observed is None or coordinates is None:
             continue
 
+        lookup_point_id = str(point_id)
+        point_id = lookup_point_id.split("_", 1)[-1]
         timestamp = int(millis)
-        rows.append(
-            {
-                "point_id": point_id,
-                "set_type": set_type,
-                "sensor": sensor_name,
-                "band": band_label,
-                "longitude": coordinates[0],
-                "latitude": coordinates[1],
-                "timestamp": timestamp,
-                "date": datetime.utcfromtimestamp(timestamp / 1000).strftime("%Y-%m-%d"),
-                "observed": float(observed),
-            }
-        )
+        row: Dict[str, object] = {
+            "point_id": point_id,
+            "set_type": set_type,
+            "sensor": sensor_name,
+            "band": band_label,
+            "longitude": coordinates[0],
+            "latitude": coordinates[1],
+            "timestamp": timestamp,
+            "date": datetime.utcfromtimestamp(timestamp / 1000).strftime("%Y-%m-%d"),
+            "observed": float(observed),
+            "point_lookup_id": lookup_point_id,
+        }
+
+        for field in CCDC_FIELDNAMES:
+            value = properties.get(field)
+            row[field] = float(value) if value is not None else None
+
+        rows.append(row)
 
     rows.sort(key=lambda row: (row["point_id"], row["timestamp"]))
     return rows
@@ -307,19 +322,20 @@ def stream_samples_to_writers(
 
     for chunk in chunked(points, chunk_size):
         features = sample_collection_for_points(collection, chunk, scale, tile_scale)
-        pprint(features)
         rows = features_to_rows(features, set_type, sensor_name, band_label)
         if not rows:
             continue
 
         for row in rows:
-            point_idx = index_lookup.get(row["point_id"])
+            lookup_key = row.get("point_lookup_id", row["point_id"])
+            point_idx = index_lookup.get(lookup_key)
             if point_idx is None:
                 continue
 
+            row_to_write = {field: row.get(field) for field in CSV_FIELDNAMES}
             for size in ordered_sizes:
                 if point_idx < size:
-                    writers[size].writerow(row)
+                    writers[size].writerow(row_to_write)
 
 
 def build_output_filename(

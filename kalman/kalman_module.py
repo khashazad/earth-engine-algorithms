@@ -26,6 +26,45 @@ from lib.utils.ee.dates import convert_date
 ee.Initialize(opt_url=ee.data.HIGH_VOLUME_API_BASE_URL)
 
 
+def fetch_ccdc_coefficients(image, date, bands):
+    ccdc_asset = COLLECTIONS["CCDC_Global"].mosaic()
+
+    coefs = HARMONIC_TAGS
+
+    segments_count = 10
+    segments = build_segment_tag(segments_count)
+
+    ccdc_image = build_ccd_image(ccdc_asset, segments_count, bands)
+
+    date = convert_date(
+        {
+            "input_format": 2,
+            "input_date": date,
+            "output_format": 1,
+        }
+    )
+
+    coefs = get_multi_coefs(
+        ccdc_image,
+        date,
+        bands,
+        coef_list=HARMONIC_TAGS,
+        cond=True,
+        segment_names=segments,
+        behavior="before",
+    ).rename([*[f"{CCDC.BAND_PREFIX.value}_{x}" for x in HARMONIC_TAGS]])
+
+    synthetic_image = get_multi_synthetic(
+        ccdc_image,
+        date,
+        date_format=1,
+        band_list=bands,
+        segments=segments,
+    ).rename(CCDC.FIT.value)
+
+    return image.addBands(coefs.addBands(synthetic_image), overwrite=True)
+
+
 def append_ccdc_coefficients(image):
     ccdc_asset = COLLECTIONS["CCDC_Global"].mosaic()
 
