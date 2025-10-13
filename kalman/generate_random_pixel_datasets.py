@@ -1,15 +1,12 @@
-from __future__ import annotations
-
 import argparse
 import csv
 import random
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 import ee
-
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -27,15 +24,15 @@ LAT_MIN = -10.6813
 LAT_MAX = -10.1315
 AOI = ee.Geometry.Rectangle([LON_MIN, LAT_MIN, LON_MAX, LAT_MAX])
 
-SAMPLE_SIZES = [10]
 DEFAULT_START_DATE = "2012-01-01"
-DEFAULT_END_DATE = "2018-12-31"
+DEFAULT_END_DATE = "2019-12-31"
 DEFAULT_OUTPUT_DIR = Path("kalman/random_pixel_datasets")
 DEFAULT_CHUNK_SIZE = 50
-DEFAULT_TILE_SCALE = 4
 DEFAULT_RANDOM_SEED = 42
+DEFAULT_SAMPLE_SIZE = 100
+DEFAULT_TILE_SCALE = 4
 
-CSV_FIELDNAMES = [
+BASE_FIELDNAMES = [
     "point_id",
     "set_type",
     "sensor",
@@ -49,7 +46,6 @@ CSV_FIELDNAMES = [
 
 CCDC_FIELDNAMES = [f"{CCDC.BAND_PREFIX.value}_{tag}" for tag in HARMONIC_TAGS]
 CCDC_FIELDNAMES.append(CCDC.FIT.value)
-CSV_FIELDNAMES.extend(CCDC_FIELDNAMES)
 
 
 @dataclass(frozen=True)
@@ -68,24 +64,17 @@ class SensorConfig:
     mask_fn: Callable[[ee.Image], ee.Image] | None = None
     scale_fn: Callable[[ee.Image], ee.Image] | None = None
     start_date: str | None = None
+    include_ccdc: bool = True
 
 def mask_landsat_surface_reflectance(image: ee.Image) -> ee.Image:
-
-    qa_pixel = image.select("QA_PIXEL")
-    qa_radsat = image.select("QA_RADSAT")
-
-    clear_mask = (
-        qa_pixel.bitwiseAnd(1).eq(0)
-        .And(qa_pixel.bitwiseAnd(1 << 1).eq(0))
-        .And(qa_pixel.bitwiseAnd(1 << 2).eq(0))
-        .And(qa_pixel.bitwiseAnd(1 << 3).eq(0))
-        .And(qa_pixel.bitwiseAnd(1 << 4).eq(0))
-        .And(qa_pixel.bitwiseAnd(1 << 5).eq(0))
-    )
-
-    saturation_mask = qa_radsat.eq(0)
-
-    return ee.Image(image.updateMask(clear_mask).updateMask(saturation_mask))
+    # Bit 0 - Fill
+    # Bit 1 - Dilated Cloud
+    # Bit 2 - Cirrus
+    # Bit 3 - Cloud
+    # Bit 4 - Cloud Shadow
+    qa_mask = image.select('QA_PIXEL').bitwiseAnd(int('11111', 2)).eq(0)
+    saturation_mask = image.select('QA_RADSAT').eq(0)
+    return image.updateMask(qa_mask).updateMask(saturation_mask)
 
 
 def scale_landsat_surface_reflectance(image: ee.Image) -> ee.Image:
@@ -95,18 +84,30 @@ def scale_landsat_surface_reflectance(image: ee.Image) -> ee.Image:
 
 
 def mask_sentinel2_surface_reflectance(image: ee.Image) -> ee.Image:
+    params = {
+        'QA_Band_Name_Input': 'QA60',
+        'cloudBit': 2**10,
+        'cirrusBit': 2**11,
+        'waterBit': 2**11,
+        'clouds_bit_Thresh': 0,
+        'cirrus_bit_Thresh': 0,
+        'water_bit_Thresh': 0
+    }
 
-    qa60 = image.select("QA60")
-    cloud_bit = 1 << 10
-    cirrus_bit = 1 << 11
-    mask = qa60.bitwiseAnd(cloud_bit).eq(0).And(qa60.bitwiseAnd(cirrus_bit).eq(0))
-    return ee.Image(image.updateMask(mask))
+    input_image = ee.Image(image)
+    cloud_bqa = input_image.select(params['QA_Band_Name_Input'])
 
+    cloud_mask = (
+        cloud_bqa.bitwiseAnd(params['cloudBit']).eq(params['clouds_bit_Thresh'])
+        .And(cloud_bqa.bitwiseAnd(params['cirrusBit']).eq(params['cirrus_bit_Thresh']))
+        .And(cloud_bqa.bitwiseAnd(params['waterBit']).eq(params['water_bit_Thresh']))
+    )
+
+    return input_image.updateMask(cloud_mask)
 
 def scale_sentinel2_surface_reflectance(image: ee.Image) -> ee.Image:
-    scaled = image.select("B.*").multiply(0.0001)
-    return ee.Image(image.addBands(scaled, None, True))
-
+    optical = image.select("B.*").multiply(0.0001)
+    return ee.Image(image.addBands(optical, None, True))
 
 def build_sensor_configs() -> Dict[str, SensorConfig]:
     return {
@@ -121,26 +122,22 @@ def build_sensor_configs() -> Dict[str, SensorConfig]:
             scale=30,
             mask_fn=mask_landsat_surface_reflectance,
             scale_fn=scale_landsat_surface_reflectance,
-            start_date="2013-04-11",
+            start_date="2013-03-18",
         ),
-        # "Landsat9": SensorConfig(
-        #     name="Landsat9",
-        #     collection_id="LANDSAT/LC09/C02/T1_L2",
-        #     band_map={"SWIR2": "SR_B7", "NIR": "SR_B5", "RED": "SR_B4"},
-        #     scale=30,
-        #     mask_fn=mask_landsat_surface_reflectance,
-        #     scale_fn=scale_landsat_surface_reflectance,
-        #     start_date="2021-11-01",
-        # ),
-        # "Sentinel2": SensorConfig(
-        #     name="Sentinel2",
-        #     collection_id="COPERNICUS/S2_SR_HARMONIZED",
-        #     band_map={"SWIR2": "B12", "NIR": "B8", "RED": "B4"},
-        #     scale=10,
-        #     mask_fn=mask_sentinel2_surface_reflectance,
-        #     scale_fn=scale_sentinel2_surface_reflectance,
-        #     start_date="2015-06-23",
-        # ),
+        "Sentinel2": SensorConfig(
+            name="Sentinel2",
+            collection_id="COPERNICUS/S2_SR_HARMONIZED",
+            band_map={
+                "SWIR2": "B12",
+                "NIR": "B8",
+                "RED": "B4",
+            },
+            scale=20,
+            mask_fn=mask_sentinel2_surface_reflectance,
+            scale_fn=scale_sentinel2_surface_reflectance,
+            start_date="2017-03-28",
+            include_ccdc=False,
+        ),
     }
 
 
@@ -155,6 +152,38 @@ def generate_random_points(count: int, prefix: str, rng: random.Random) -> List[
         lon = rng.uniform(LON_MIN, LON_MAX)
         lat = rng.uniform(LAT_MIN, LAT_MAX)
         points.append(Point(f"{prefix}_{idx:05d}", lon, lat))
+    return points
+
+
+def load_points_from_asset(
+    asset_id: str,
+    id_property: str,
+    prefix: str,
+    limit: Optional[int],
+) -> List[Point]:
+    collection = ee.FeatureCollection(asset_id)
+    if limit is not None:
+        collection = collection.limit(limit)
+
+    info = collection.getInfo()
+    features = info.get("features", [])
+    points: List[Point] = []
+
+    for idx, feature in enumerate(features):
+        geometry = feature.get("geometry", {})
+        coordinates = geometry.get("coordinates", [])
+        if not coordinates or len(coordinates) < 2:
+            continue
+
+        lon, lat = float(coordinates[0]), float(coordinates[1])
+        properties = feature.get("properties", {})
+        identifier = properties.get(id_property) or feature.get("id")
+        if identifier is None:
+            identifier = f"{idx:05d}"
+
+        suffix = str(identifier).replace(" ", "_")
+        points.append(Point(f"{prefix}_{suffix}", lon, lat))
+
     return points
 
 
@@ -176,7 +205,8 @@ def prepare_collection(
     if config.start_date and config.start_date > start_date:
         effective_start = config.start_date
 
-    collection = ee.ImageCollection(config.collection_id).filterBounds(AOI)
+    collection = ee.ImageCollection(config.collection_id)
+    # .filterBounds(AOI)
     collection = collection.filterDate(effective_start, end_date)
 
     def apply_all(image: ee.Image) -> ee.Image:
@@ -189,7 +219,12 @@ def prepare_collection(
             image, image.propertyNames()
         )
         value_band = add_time_band(value_band)
-        value_band = fetch_ccdc_coefficients(value_band, ee.Number(value_band.get("system:time_start")), [band_label])
+        if config.include_ccdc:
+            value_band = fetch_ccdc_coefficients(
+                value_band,
+                ee.Number(value_band.get("system:time_start")),
+                [band_label],
+            )
 
         return value_band
 
@@ -233,6 +268,7 @@ def features_to_rows(
     set_type: str,
     sensor_name: str,
     band_label: str,
+    include_ccdc: bool,
 ) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for feature in features:
@@ -263,9 +299,10 @@ def features_to_rows(
             "point_lookup_id": lookup_point_id,
         }
 
-        for field in CCDC_FIELDNAMES:
-            value = properties.get(field)
-            row[field] = float(value) if value is not None else None
+        if include_ccdc:
+            for field in CCDC_FIELDNAMES:
+                value = properties.get(field)
+                row[field] = float(value) if value is not None else None
 
         rows.append(row)
 
@@ -273,36 +310,35 @@ def features_to_rows(
     return rows
 
 
-def open_dataset_writers(
+def build_fieldnames(include_ccdc: bool) -> List[str]:
+    fieldnames = list(BASE_FIELDNAMES)
+    if include_ccdc:
+        fieldnames.extend(CCDC_FIELDNAMES)
+    return fieldnames
+
+
+def open_dataset_writer(
     output_dir: Path,
     sensor_name: str,
     band_label: str,
     set_type: str,
-    set_sizes: Sequence[int],
-) -> tuple[Dict[int, csv.DictWriter], Dict[int, object]]:
-
-    writers: Dict[int, csv.DictWriter] = {}
-    handles: Dict[int, object] = {}
-
-    for size in set_sizes:
-        filename = build_output_filename(band_label, sensor_name, size, set_type)
-        path = output_dir / sensor_name / band_label / filename
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("w", newline="")
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDNAMES)
-        writer.writeheader()
-        writers[size] = writer
-        handles[size] = handle
-
-    return writers, handles
+    set_size: int,
+    fieldnames: Sequence[str],
+) -> tuple[csv.DictWriter, object]:
+    filename = build_output_filename(band_label, sensor_name, set_size, set_type)
+    path = output_dir / sensor_name / band_label / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", newline="")
+    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    writer.writeheader()
+    return writer, handle
 
 
-def close_dataset_writers(handles: Dict[int, object]) -> None:
-    for handle in handles.values():
-        handle.close()
+def close_dataset_writer(handle: object) -> None:
+    handle.close()
 
 
-def stream_samples_to_writers(
+def stream_samples_to_writer(
     collection: ee.ImageCollection,
     points: Sequence[Point],
     set_type: str,
@@ -311,19 +347,24 @@ def stream_samples_to_writers(
     scale: int,
     tile_scale: int,
     chunk_size: int,
-    set_sizes: Sequence[int],
-    writers: Dict[int, csv.DictWriter],
+    set_size: int,
+    writer: csv.DictWriter,
+    fieldnames: Sequence[str],
+    include_ccdc: bool,
 ) -> None:
 
-    if not writers:
+    if set_size <= 0 or writer is None:
         return
 
-    index_lookup = {point.id: idx for idx, point in enumerate(points)}
-    ordered_sizes = sorted(set_sizes)
+    selected_points = list(points[:set_size])
+    if not selected_points:
+        return
 
-    for chunk in chunked(points, chunk_size):
+    index_lookup = {point.id: idx for idx, point in enumerate(selected_points)}
+
+    for chunk in chunked(selected_points, chunk_size):
         features = sample_collection_for_points(collection, chunk, scale, tile_scale)
-        rows = features_to_rows(features, set_type, sensor_name, band_label)
+        rows = features_to_rows(features, set_type, sensor_name, band_label, include_ccdc)
         if not rows:
             continue
 
@@ -333,10 +374,8 @@ def stream_samples_to_writers(
             if point_idx is None:
                 continue
 
-            row_to_write = {field: row.get(field) for field in CSV_FIELDNAMES}
-            for size in ordered_sizes:
-                if point_idx < size:
-                    writers[size].writerow(row_to_write)
+            row_to_write = {field: row.get(field) for field in fieldnames}
+            writer.writerow(row_to_write)
 
 
 def build_output_filename(
@@ -345,7 +384,7 @@ def build_output_filename(
     set_size: int,
     set_type: str,
 ) -> str:
-    capitalized_sensor = sensor_name.replace("Sentinel", "Sentinel-")
+    capitalized_sensor = sensor_name
     suffix = "Training" if set_type.lower() == "train" else "Testing"
     return f"ObservedVSCCDC.{set_size}Points.{band_label}.{capitalized_sensor}.{suffix}.csv"
 
@@ -381,10 +420,27 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RANDOM_SEED,
     )
     parser.add_argument(
-        "--sizes",
+        "--sample-size",
         type=int,
-        nargs="+",
-        default=SAMPLE_SIZES,
+        help="Number of random points to sample for each dataset when no asset is provided.",
+    )
+    parser.add_argument(
+        "--train-asset",
+        help="Earth Engine FeatureCollection asset ID providing training points.",
+    )
+    parser.add_argument(
+        "--test-asset",
+        help="Earth Engine FeatureCollection asset ID providing testing points.",
+    )
+    parser.add_argument(
+        "--train-id-property",
+        default="system:index",
+        help="Feature property to use as the identifier for training asset points.",
+    )
+    parser.add_argument(
+        "--test-id-property",
+        default="system:index",
+        help="Feature property to use as the identifier for testing asset points.",
     )
     return parser.parse_args()
 
@@ -392,34 +448,61 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.sample_size is not None and args.sample_size <= 0:
+        raise ValueError("Sample size must be positive when provided.")
+
     rng_train = random.Random(args.seed)
     rng_test = random.Random(args.seed + 1)
-    sample_sizes = sorted(set(args.sizes))
-    max_size = sample_sizes[-1]
 
     sensors = build_sensor_configs()
 
-    train_points = generate_random_points(max_size, "train", rng_train)
-    test_points = generate_random_points(max_size, "test", rng_test)
+    random_sample_size = args.sample_size or DEFAULT_SAMPLE_SIZE
+    asset_limit = args.sample_size if args.sample_size and args.sample_size > 0 else None
+
+    if args.train_asset:
+        train_points = load_points_from_asset(
+            args.train_asset,
+            args.train_id_property,
+            "train",
+            asset_limit,
+        )
+    else:
+        train_points = generate_random_points(random_sample_size, "train", rng_train)
+
+    if args.test_asset:
+        test_points = load_points_from_asset(
+            args.test_asset,
+            args.test_id_property,
+            "test",
+            asset_limit,
+        )
+    else:
+        test_points = generate_random_points(random_sample_size, "test", rng_test)
 
     for sensor_name, config in sensors.items():
+        fieldnames = build_fieldnames(config.include_ccdc)
         for band_label, band_name in config.band_map.items():
             collection = prepare_collection(config, band_name, args.start_date, args.end_date, band_label)
             collection_size = collection.size().getInfo()
             has_data = collection_size > 0
 
             for set_type, points in (("train", train_points), ("test", test_points)):
-                writers, handles = open_dataset_writers(
+                set_size = len(points)
+                if set_size == 0:
+                    continue
+
+                writer, handle = open_dataset_writer(
                     args.output_dir,
                     sensor_name,
                     band_label,
                     set_type,
-                    sample_sizes,
+                    set_size,
+                    fieldnames,
                 )
 
                 try:
                     if has_data:
-                        stream_samples_to_writers(
+                        stream_samples_to_writer(
                             collection,
                             points,
                             set_type,
@@ -428,11 +511,13 @@ def main() -> None:
                             config.scale,
                             args.tile_scale,
                             args.chunk_size,
-                            sample_sizes,
-                            writers,
+                            set_size,
+                            writer,
+                            fieldnames,
+                            config.include_ccdc,
                         )
                 finally:
-                    close_dataset_writers(handles)
+                    close_dataset_writer(handle)
 
 
 if __name__ == "__main__":
