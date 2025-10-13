@@ -115,8 +115,8 @@ def build_sensor_configs() -> Dict[str, SensorConfig]:
             collection_id="LANDSAT/LC08/C02/T1_L2",
             band_map={
                 "SWIR2": "SR_B7",
-                # "NIR": "SR_B5",
-                # "RED": "SR_B4"
+                "NIR": "SR_B5",
+                "RED": "SR_B4"
             },
             scale=30,
             mask_fn=mask_landsat_surface_reflectance,
@@ -169,6 +169,7 @@ def prepare_collection(
     band_name: str,
     start_date: str,
     end_date: str,
+    band_label: str
 ) -> ee.ImageCollection:
 
     effective_start = start_date
@@ -188,7 +189,7 @@ def prepare_collection(
             image, image.propertyNames()
         )
         value_band = add_time_band(value_band)
-        value_band = fetch_ccdc_coefficients(value_band, ee.Number(value_band.get("system:time_start")), ["SWIR2"])
+        value_band = fetch_ccdc_coefficients(value_band, ee.Number(value_band.get("system:time_start")), [band_label])
 
         return value_band
 
@@ -403,7 +404,7 @@ def main() -> None:
 
     for sensor_name, config in sensors.items():
         for band_label, band_name in config.band_map.items():
-            collection = prepare_collection(config, band_name, args.start_date, args.end_date)
+            collection = prepare_collection(config, band_name, args.start_date, args.end_date, band_label)
             collection_size = collection.size().getInfo()
             has_data = collection_size > 0
 
